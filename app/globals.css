@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #111b21;
+  color: #e9edef;
+  font-family: 'Segoe UI', sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #111b21;
+}
+::-webkit-scrollbar-thumb {
+  background: #374045;
+  border-radius: 3px;
+}
+
+.message-in {
+  background-color: #202c33;
+  border-radius: 0 8px 8px 8px;
+}
+
+.message-out {
+  background-color: #005c4b;
+  border-radius: 8px 0 8px 8px;
+}
+
+.message-ai {
+  background-color: #3b1f6e;
+  border-radius: 0 8px 8px 8px;
+}
