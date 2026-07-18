@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
-import { supabase, AI_USER_ID, AI_NAME } from '@/lib/supabase';
+import { supabase, AI_USER_ID, AI_NAME, LUNA_DIRECT_NAME } from '@/lib/supabase';
 import { Message, Room } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import { Send, Bot } from 'lucide-react';
@@ -15,7 +15,9 @@ export default function ChatWindow({ room, currentUser }: Props) {
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [aiTyping, setAiTyping] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isLunaDirect = room.name === LUNA_DIRECT_NAME;
 
   useEffect(() => {
     fetchMessages();
@@ -40,13 +42,18 @@ export default function ChatWindow({ room, currentUser }: Props) {
   }, [messages]);
 
   const fetchMessages = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('messages')
       .select('*, profiles(full_name, username, avatar_url)')
       .eq('room_id', room.id)
       .order('created_at', { ascending: true })
       .limit(100);
 
+    if (error) {
+      console.error('fetchMessages error:', error);
+      setErrorMsg('Could not load messages: ' + error.message);
+      return;
+    }
     if (data) setMessages(data as Message[]);
   };
 
@@ -60,18 +67,21 @@ export default function ChatWindow({ room, currentUser }: Props) {
     const messageText = newMessage;
     setNewMessage('');
     setLoading(true);
+    setErrorMsg('');
 
     try {
       // Insert user message
-      await supabase.from('messages').insert({
+      const { error: insertError } = await supabase.from('messages').insert({
         room_id: room.id,
         sender_id: currentUser.id,
         content: messageText,
       });
 
+      if (insertError) throw insertError;
+
       // Check if AI should reply
       const shouldAIReply =
-        room.id === 'luna-direct' ||
+        isLunaDirect ||
         messageText.toLowerCase().includes('@luna') ||
         room.has_ai;
 
@@ -95,10 +105,17 @@ export default function ChatWindow({ room, currentUser }: Props) {
           }),
         });
 
-        if (!response.ok) throw new Error('AI reply failed');
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || 'Luna failed to reply. Try again in a moment.');
+        }
+
+        // The AI reply is written to the DB by the API route; the realtime
+        // subscription above will pick it up and refresh the message list.
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error('sendMessage error:', err);
+      setErrorMsg(err?.message || 'Something went wrong sending that message.');
     } finally {
       setLoading(false);
       setAiTyping(false);
@@ -117,18 +134,18 @@ export default function ChatWindow({ room, currentUser }: Props) {
       {/* Chat Header */}
       <div className="px-6 py-4 bg-dark-200 border-b border-dark-300 flex items-center gap-4">
         <div className={`w-10 h-10 rounded-full flex items-center justify-center text-xl
-          ${room.id === 'luna-direct' ? 'bg-purple-700' : room.is_group ? 'bg-blue-700' : 'bg-green-700'}`}>
-          {room.id === 'luna-direct' ? '🤖' : room.is_group ? '👥' : '👤'}
+          ${isLunaDirect ? 'bg-purple-700' : room.is_group ? 'bg-blue-700' : 'bg-green-700'}`}>
+          {isLunaDirect ? '🤖' : room.is_group ? '👥' : '👤'}
         </div>
         <div>
-          <p className="font-semibold">{room.name || (room.id === 'luna-direct' ? AI_NAME : 'Private Chat')}</p>
+          <p className="font-semibold">{isLunaDirect ? AI_NAME : (room.name || 'Private Chat')}</p>
           <p className="text-xs text-gray-400">
-            {room.id === 'luna-direct' ? 'AI Assistant • Always Online' :
+            {isLunaDirect ? 'AI Assistant • Always Online' :
               room.is_group ? 'Group • @luna for AI help' : 'Private Chat'}
           </p>
         </div>
 
-        {room.has_ai && room.id !== 'luna-direct' && (
+        {room.has_ai && !isLunaDirect && (
           <div className="ml-auto flex items-center gap-1 text-purple-400 text-xs bg-purple-900/30 px-3 py-1 rounded-full">
             <Bot size={12} />
             Luna Active
@@ -169,6 +186,11 @@ export default function ChatWindow({ room, currentUser }: Props) {
 
       {/* Input */}
       <div className="p-4 bg-dark-200 border-t border-dark-300">
+        {errorMsg && (
+          <div className="bg-red-900/30 border border-red-500 text-red-400 rounded-lg p-2 mb-2 text-xs">
+            ❌ {errorMsg}
+          </div>
+        )}
         <div className="flex items-center gap-3">
           <div className="flex-1 bg-dark-300 rounded-full px-6 py-3 flex items-center">
             <input
