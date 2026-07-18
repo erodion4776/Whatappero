@@ -3,6 +3,7 @@ export interface Profile {
   username: string;
   full_name: string;
   avatar_url: string | null;
+  is_bot: boolean;
   created_at: string;
 }
 
@@ -10,9 +11,9 @@ export interface Room {
   id: string;
   name: string | null;
   is_group: boolean;
+  has_ai: boolean;
   created_by: string;
   created_at: string;
-  has_ai: boolean;
 }
 
 export interface Message {
@@ -27,5 +28,6 @@ export interface Message {
 export interface RoomMember {
   room_id: string;
   user_id: string;
+  joined_at: string;
   profiles?: Profile;
 }
