@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { supabase, AI_USER_ID, AI_NAME } from '@/lib/supabase';
+import { supabase, AI_USER_ID, AI_NAME, LUNA_DIRECT_NAME } from '@/lib/supabase';
 import { Room, Profile } from '@/lib/types';
 import { MessageSquare, Users, Plus, LogOut, Search } from 'lucide-react';
 
@@ -12,15 +12,19 @@ interface Props {
 
 export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Props) {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [lunaRoom, setLunaRoom] = useState<Room | null>(null);
+  const [lunaLoading, setLunaLoading] = useState(false);
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
   const [isGroup, setIsGroup] = useState(false);
   const [inviteUsername, setInviteUsername] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
     fetchRooms();
+    getOrCreateLunaRoom();
 
     // Realtime room updates
     const channel = supabase
@@ -34,27 +38,118 @@ export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Prop
   }, []);
 
   const fetchRooms = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('room_members')
       .select('room_id, rooms(*)')
       .eq('user_id', currentUser.id);
 
+    if (error) {
+      console.error('fetchRooms error:', error);
+      return;
+    }
+
     if (data) {
-      const roomList = data.map((d: any) => d.rooms).filter(Boolean);
+      const roomList = data
+        .map((d: any) => d.rooms)
+        .filter(Boolean)
+        // The Luna direct room is rendered separately as the pinned row above,
+        // so don't show it again in the regular room list.
+        .filter((r: Room) => r.name !== LUNA_DIRECT_NAME);
       setRooms(roomList);
     }
   };
 
-  const createRoom = async () => {
-    if (!newRoomName.trim() && isGroup) return;
-    setLoading(true);
-
+  // A real, persisted 1:1 room with Luna AI (instead of a fake client-side id
+  // that was never written to the `rooms` table — that's what was causing
+  // messages sent to "Luna direct" to silently fail to save and vanish).
+  const getOrCreateLunaRoom = async () => {
+    setLunaLoading(true);
     try {
-      // Create room
-      const { data: room, error } = await supabase
+      // 1. Look for an existing Luna direct room owned by this user
+      const { data: existing, error: findError } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('created_by', currentUser.id)
+        .eq('name', LUNA_DIRECT_NAME)
+        .maybeSingle();
+
+      if (findError) throw findError;
+
+      if (existing) {
+        setLunaRoom(existing);
+        return;
+      }
+
+      // 2. None found — create it
+      const { data: room, error: createError } = await supabase
         .from('rooms')
         .insert({
-          name: isGroup ? newRoomName : null,
+          name: LUNA_DIRECT_NAME,
+          is_group: false,
+          created_by: currentUser.id,
+          has_ai: true,
+        })
+        .select()
+        .single();
+
+      if (createError || !room) throw createError;
+
+      const { error: memberError } = await supabase.from('room_members').insert([
+        { room_id: room.id, user_id: currentUser.id },
+        { room_id: room.id, user_id: AI_USER_ID },
+      ]);
+      if (memberError) throw memberError;
+
+      const { error: msgError } = await supabase.from('messages').insert({
+        room_id: room.id,
+        sender_id: AI_USER_ID,
+        content: `Hey there! 👋 I'm Luna, your personal AI assistant. Ask me anything or just chat! 😊`,
+      });
+      if (msgError) console.error('Luna welcome message error:', msgError);
+
+      setLunaRoom(room);
+    } catch (err: any) {
+      console.error('getOrCreateLunaRoom error:', err);
+      setErrorMsg(err?.message || 'Could not start Luna chat. Check your Supabase permissions.');
+    } finally {
+      setLunaLoading(false);
+    }
+  };
+
+  const createRoom = async () => {
+    setErrorMsg('');
+
+    if (isGroup && !newRoomName.trim()) {
+      setErrorMsg('Please enter a group name.');
+      return;
+    }
+
+    setLoading(true);
+    let createdRoomId: string | null = null;
+
+    try {
+      // If an invite username was given, resolve it first so we fail fast
+      // with a clear message instead of silently creating an empty room.
+      let inviteeId: string | null = null;
+      if (inviteUsername.trim()) {
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('username', inviteUsername.toLowerCase().trim())
+          .maybeSingle();
+
+        if (profileError) throw profileError;
+        if (!profile) {
+          throw new Error(`No user found with username "${inviteUsername.trim()}".`);
+        }
+        inviteeId = profile.id;
+      }
+
+      // Create room
+      const { data: room, error: roomError } = await supabase
+        .from('rooms')
+        .insert({
+          name: isGroup ? newRoomName.trim() : null,
           is_group: isGroup,
           created_by: currentUser.id,
           has_ai: true,
@@ -62,68 +157,58 @@ export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Prop
         .select()
         .single();
 
-      if (error || !room) throw error;
+      if (roomError) throw roomError;
+      if (!room) throw new Error('Room was not created.');
+      createdRoomId = room.id;
 
       // Add current user
-      await supabase.from('room_members').insert({
+      const { error: selfMemberError } = await supabase.from('room_members').insert({
         room_id: room.id,
         user_id: currentUser.id,
       });
+      if (selfMemberError) throw selfMemberError;
 
       // Add AI bot automatically
-      await supabase.from('room_members').insert({
+      const { error: aiMemberError } = await supabase.from('room_members').insert({
         room_id: room.id,
         user_id: AI_USER_ID,
       });
+      if (aiMemberError) throw aiMemberError;
 
-      // Add welcome message from AI
-      await supabase.from('messages').insert({
+      // Add invited user, if any
+      if (inviteeId) {
+        const { error: inviteeMemberError } = await supabase.from('room_members').insert({
+          room_id: room.id,
+          user_id: inviteeId,
+        });
+        if (inviteeMemberError) throw inviteeMemberError;
+      }
+
+      // Add welcome message from AI (non-fatal if it fails)
+      const { error: msgError } = await supabase.from('messages').insert({
         room_id: room.id,
         sender_id: AI_USER_ID,
         content: isGroup
           ? `Welcome to ${newRoomName}! 👋 I'm Luna, your AI assistant. I'm here to help! Just type @luna to talk to me.`
           : `Hey there! 👋 I'm Luna, your personal AI assistant. Ask me anything or just chat! 😊`,
       });
-
-      // If private chat, add the other user by username
-      if (!isGroup && inviteUsername.trim()) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('username', inviteUsername.toLowerCase())
-          .single();
-
-        if (profile) {
-          await supabase.from('room_members').insert({
-            room_id: room.id,
-            user_id: profile.id,
-          });
-        }
-      }
-
-      // If group, invite user
-      if (isGroup && inviteUsername.trim()) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('username', inviteUsername.toLowerCase())
-          .single();
-
-        if (profile) {
-          await supabase.from('room_members').insert({
-            room_id: room.id,
-            user_id: profile.id,
-          });
-        }
-      }
+      if (msgError) console.error('Welcome message error:', msgError);
 
       setShowNewRoom(false);
       setNewRoomName('');
       setInviteUsername('');
       fetchRooms();
       onRoomSelect(room);
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error('createRoom error:', err);
+      // Clean up a partially-created room so retries don't leave orphaned rows
+      if (createdRoomId) {
+        await supabase.from('rooms').delete().eq('id', createdRoomId);
+      }
+      setErrorMsg(
+        err?.message ||
+          'Could not create the chat. This is usually a Supabase Row Level Security (RLS) permissions issue — see the notes below the form.'
+      );
     } finally {
       setLoading(false);
     }
@@ -185,6 +270,12 @@ export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Prop
         <div className="mx-3 mb-3 bg-dark-300 rounded-xl p-4 space-y-3">
           <h3 className="font-semibold text-sm">New Conversation</h3>
 
+          {errorMsg && (
+            <div className="bg-red-900/30 border border-red-500 text-red-400 rounded-lg p-2 text-xs">
+              ❌ {errorMsg}
+            </div>
+          )}
+
           <div className="flex gap-2">
             <button
               onClick={() => setIsGroup(false)}
@@ -238,8 +329,10 @@ export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Prop
       <div className="flex-1 overflow-y-auto">
         {/* Luna AI always at top */}
         <div
-          className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-dark-300 transition-colors ${currentRoom?.id === 'luna-direct' ? 'bg-dark-300' : ''}`}
-          onClick={() => onRoomSelect({ id: 'luna-direct', name: AI_NAME, is_group: false, created_by: '', created_at: '', has_ai: true })}
+          className={`flex items-center gap-3 px-4 py-3 transition-colors ${lunaLoading ? 'opacity-50 cursor-wait' : 'cursor-pointer hover:bg-dark-300'} ${currentRoom && lunaRoom && currentRoom.id === lunaRoom.id ? 'bg-dark-300' : ''}`}
+          onClick={() => {
+            if (lunaRoom) onRoomSelect(lunaRoom);
+          }}
         >
           <div className="w-12 h-12 bg-purple-700 rounded-full flex items-center justify-center text-xl">
             🤖
@@ -249,7 +342,9 @@ export default function Sidebar({ currentRoom, onRoomSelect, currentUser }: Prop
               <p className="font-medium text-sm">{AI_NAME}</p>
               <span className="text-xs text-primary">AI</span>
             </div>
-            <p className="text-xs text-gray-400 truncate">Chat with your AI assistant</p>
+            <p className="text-xs text-gray-400 truncate">
+              {lunaLoading ? 'Setting up...' : 'Chat with your AI assistant'}
+            </p>
           </div>
         </div>
 
